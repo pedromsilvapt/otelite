@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -118,7 +119,8 @@ func initDB(dbPath string) error {
 		severity_text TEXT,
 		body TEXT,
 		log_timestamp INTEGER,
-		raw_json TEXT
+		raw_json TEXT,
+		raw_body TEXT
 	);
 	CREATE INDEX IF NOT EXISTS idx_logs_trace_id ON logs(trace_id);
 	CREATE INDEX IF NOT EXISTS idx_logs_service_name ON logs(service_name);
@@ -607,6 +609,54 @@ func insertLog(serviceName string, logMap map[string]interface{}) error {
 	return nil
 }
 
+// interpolateBody replaces {Key} placeholders in a log body template with
+// the corresponding values from the log record's attributes array.
+// For example, body "User {UserId} ({Username}) deleted successfully" with
+// attributes [{"key":"UserId","value":{"intValue":1}},{"key":"Username","value":{"stringValue":"alice"}}]
+// produces "User 1 (alice) deleted successfully".
+func interpolateBody(body string, logMap map[string]interface{}) string {
+	attrs, ok := logMap["attributes"].([]interface{})
+	if !ok || len(attrs) == 0 {
+		return body
+	}
+
+	// Build key -> string-value lookup from the attributes array.
+	attrValues := make(map[string]string, len(attrs))
+	for _, a := range attrs {
+		attrMap, ok := a.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		key, _ := attrMap["key"].(string)
+		valMap, ok := attrMap["value"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// Pick the first (and only) entry in the value map regardless of type key
+		// (stringValue, intValue, doubleValue, boolValue, …).
+		for _, v := range valMap {
+			// Format integers without a decimal point even though JSON numbers
+			// are decoded as float64 by default.
+			if f, ok := v.(float64); ok && f == float64(int64(f)) {
+				attrValues[key] = fmt.Sprintf("%d", int64(f))
+			} else {
+				attrValues[key] = fmt.Sprintf("%v", v)
+			}
+			break
+		}
+	}
+
+	// Replace every {Key} placeholder found in the body.
+	placeholderRe := regexp.MustCompile(`\{(\w+)\}`)
+	return placeholderRe.ReplaceAllStringFunc(body, func(match string) string {
+		key := match[1 : len(match)-1] // strip surrounding { }
+		if val, found := attrValues[key]; found {
+			return val
+		}
+		return match // leave unknown placeholders untouched
+	})
+}
+
 func doInsertLog(serviceName string, logMap map[string]interface{}) error {
 	rawJSON, _ := json.Marshal(logMap)
 
@@ -619,12 +669,12 @@ func doInsertLog(serviceName string, logMap map[string]interface{}) error {
 		severityNumber = int(sn)
 	}
 
-	var body string
+	var rawBody string
 	if b, ok := logMap["body"].(string); ok {
-		body = b
+		rawBody = b
 	} else if b, ok := logMap["body"].(map[string]interface{}); ok {
 		if sv, ok := b["stringValue"].(string); ok {
-			body = sv
+			rawBody = sv
 		}
 	}
 
@@ -633,10 +683,12 @@ func doInsertLog(serviceName string, logMap map[string]interface{}) error {
 		json.Unmarshal([]byte(ts), &logTimestamp)
 	}
 
+	body := interpolateBody(rawBody, logMap)
+
 	_, err := db.Exec(`
-		INSERT INTO logs (trace_id, span_id, service_name, severity_number, severity_text, body, log_timestamp, raw_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, traceID, spanID, serviceName, severityNumber, severityText, body, logTimestamp, string(rawJSON))
+		INSERT INTO logs (trace_id, span_id, service_name, severity_number, severity_text, body, log_timestamp, raw_json, raw_body)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, traceID, spanID, serviceName, severityNumber, severityText, body, logTimestamp, string(rawJSON), rawBody)
 
 	return err
 }
