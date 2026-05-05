@@ -749,6 +749,35 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func handleDeleteAll(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[%s] %s %s", r.RemoteAddr, r.Method, r.URL.Path)
+
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if _, err := db.Exec(`DELETE FROM traces`); err != nil {
+		log.Printf("[%s] failed to delete traces: %v", r.RemoteAddr, err)
+		http.Error(w, "failed to delete traces", http.StatusInternalServerError)
+		return
+	}
+
+	if _, err := db.Exec(`DELETE FROM logs`); err != nil {
+		log.Printf("[%s] failed to delete logs: %v", r.RemoteAddr, err)
+		http.Error(w, "failed to delete logs", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("[%s] all data deleted", r.RemoteAddr)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "all data deleted successfully",
+	})
+}
+
 func catchAllHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[%s] %s %s", r.RemoteAddr, r.Method, r.URL.Path)
 
@@ -777,6 +806,7 @@ func runServer(ctx context.Context, args []string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/traces", handleTraces)
 	mux.HandleFunc("/v1/logs", handleLogs)
+	mux.HandleFunc("/api/data", handleDeleteAll)
 	mux.HandleFunc("/traces", handleQuery)
 	mux.HandleFunc("/", catchAllHandler)
 
@@ -799,6 +829,7 @@ func runServer(ctx context.Context, args []string) {
 	log.Printf("  POST /v1/traces - receive OTLP traces")
 	log.Printf("  POST /v1/logs   - receive OTLP logs")
 	log.Printf("  GET  /traces    - query stored traces")
+	log.Printf("  DELETE /api/data - delete all traces and logs")
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server failed: %v", err)
