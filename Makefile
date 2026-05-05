@@ -5,8 +5,8 @@ PIDFILE=$(BINARY).pid
 
 build: otelite
 
-$(BINARY): main.go
-	go build -o $(BINARY) main.go
+$(BINARY): main.go ui.go
+	go build -o $(BINARY) .
 	ls -l $(BINARY)
 
 start: otelite
@@ -22,8 +22,8 @@ clean:
 	rm -f $(PIDFILE) otel.db ${BINARY}
 
 build_dist:
-	GOOS=linux GOARCH=amd64 go build -o $(BINARY)-linux-amd64 main.go
-	GOOS=linux GOARCH=arm64 go build -o $(BINARY)-linux-arm64 main.go
+	GOOS=linux GOARCH=amd64 go build -o $(BINARY)-linux-amd64 .
+	GOOS=linux GOARCH=arm64 go build -o $(BINARY)-linux-arm64 .
 	ls -l $(BINARY)-linux-*
 
 

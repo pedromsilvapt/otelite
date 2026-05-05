@@ -782,7 +782,7 @@ func catchAllHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[%s] %s %s", r.RemoteAddr, r.Method, r.URL.Path)
 
 	if r.URL.Path == "/" {
-		w.Write([]byte("otelite"))
+		http.Redirect(w, r, "/ui", http.StatusFound)
 		return
 	}
 
@@ -808,6 +808,11 @@ func runServer(ctx context.Context, args []string) {
 	mux.HandleFunc("/v1/logs", handleLogs)
 	mux.HandleFunc("/api/data", handleDeleteAll)
 	mux.HandleFunc("/traces", handleQuery)
+	// UI routes — /api/traces/{id} must be registered before /api/traces
+	mux.HandleFunc("/api/traces/", handleAPITrace)
+	mux.HandleFunc("/api/traces", handleAPITracesList)
+	mux.HandleFunc("/api/logs", handleAPILogs)
+	mux.HandleFunc("/ui", handleUI)
 	mux.HandleFunc("/", catchAllHandler)
 
 	server := &http.Server{
@@ -826,9 +831,10 @@ func runServer(ctx context.Context, args []string) {
 	}()
 
 	log.Printf("OTEL collector listening on :%s", *port)
-	log.Printf("  POST /v1/traces - receive OTLP traces")
-	log.Printf("  POST /v1/logs   - receive OTLP logs")
-	log.Printf("  GET  /traces    - query stored traces")
+	log.Printf("  POST /v1/traces  - receive OTLP traces")
+	log.Printf("  POST /v1/logs    - receive OTLP logs")
+	log.Printf("  GET  /traces     - query stored traces (JSON)")
+	log.Printf("  GET  /ui         - web interface")
 	log.Printf("  DELETE /api/data - delete all traces and logs")
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
