@@ -29,9 +29,10 @@ var db *sql.DB
 
 // Insert queue to serialize all database writes
 type insertJob struct {
-	jobType     string // "span" or "log"
-	serviceName string
-	data        map[string]interface{}
+	jobType            string // "span" or "log"
+	serviceName        string
+	activitySourceName string
+	data               map[string]interface{}
 }
 
 var insertQueue chan insertJob
@@ -68,7 +69,7 @@ func processInsertJob(job insertJob) {
 	var err error
 	switch job.jobType {
 	case "span":
-		err = doInsertSpan(job.serviceName, job.data)
+		err = doInsertSpan(job.serviceName, job.activitySourceName, job.data)
 	case "log":
 		err = doInsertLog(job.serviceName, job.data)
 	}
@@ -97,6 +98,7 @@ func initDB(dbPath string) error {
 		span_id TEXT,
 		parent_span_id TEXT,
 		service_name TEXT,
+		activity_source TEXT,
 		span_name TEXT,
 		kind INTEGER,
 		start_time INTEGER,
@@ -128,7 +130,14 @@ func initDB(dbPath string) error {
 	`
 
 	_, err = db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Migration: add activity_source column to existing databases that predate this feature.
+	// SQLite silently errors if the column already exists; we ignore that.
+	db.Exec(`ALTER TABLE traces ADD COLUMN activity_source TEXT`)
+	return nil
 }
 
 func hexEncode(b []byte) string {
@@ -224,6 +233,11 @@ func handleJSONTraces(remoteAddr string, body []byte) (int, error) {
 				continue
 			}
 
+			activitySourceName := ""
+			if scope, ok := ssMap["scope"].(map[string]interface{}); ok {
+				activitySourceName, _ = scope["name"].(string)
+			}
+
 			spans, ok := ssMap["spans"].([]interface{})
 			if !ok {
 				continue
@@ -235,7 +249,7 @@ func handleJSONTraces(remoteAddr string, body []byte) (int, error) {
 					continue
 				}
 
-				if err := insertSpan(serviceName, spanMap); err != nil {
+				if err := insertSpan(serviceName, activitySourceName, spanMap); err != nil {
 					log.Printf("[%s] failed to insert span: %v", remoteAddr, err)
 					continue
 				}
@@ -266,6 +280,10 @@ func handleProtobufTraces(remoteAddr string, body []byte) (int, error) {
 		}
 
 		for _, ss := range rs.GetScopeSpans() {
+			activitySourceName := ""
+			if scope := ss.GetScope(); scope != nil {
+				activitySourceName = scope.GetName()
+			}
 			for _, span := range ss.GetSpans() {
 				spanData := map[string]interface{}{
 					"traceId":           hexEncode(span.GetTraceId()),
@@ -283,7 +301,7 @@ func handleProtobufTraces(remoteAddr string, body []byte) (int, error) {
 					spanData["attributes"] = attrs
 				}
 
-				if err := insertSpan(serviceName, spanData); err != nil {
+				if err := insertSpan(serviceName, activitySourceName, spanData); err != nil {
 					log.Printf("[%s] failed to insert span: %v", remoteAddr, err)
 					continue
 				}
@@ -399,12 +417,12 @@ func extractServiceName(rsMap map[string]interface{}) string {
 	return ""
 }
 
-func insertSpan(serviceName string, spanMap map[string]interface{}) error {
-	insertQueue <- insertJob{jobType: "span", serviceName: serviceName, data: spanMap}
+func insertSpan(serviceName string, activitySourceName string, spanMap map[string]interface{}) error {
+	insertQueue <- insertJob{jobType: "span", serviceName: serviceName, activitySourceName: activitySourceName, data: spanMap}
 	return nil
 }
 
-func doInsertSpan(serviceName string, spanMap map[string]interface{}) error {
+func doInsertSpan(serviceName string, activitySourceName string, spanMap map[string]interface{}) error {
 
 	rawJSON, _ := json.Marshal(spanMap)
 
@@ -441,9 +459,9 @@ func doInsertSpan(serviceName string, spanMap map[string]interface{}) error {
 	}
 
 	_, err := db.Exec(`
-		INSERT INTO traces (trace_id, span_id, parent_span_id, service_name, span_name, kind, start_time, end_time, status_code, attributes, raw_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, traceID, spanID, parentSpanID, serviceName, spanName, kind, startTime, endTime, statusCode, attrsJSON, string(rawJSON))
+		INSERT INTO traces (trace_id, span_id, parent_span_id, service_name, activity_source, span_name, kind, start_time, end_time, status_code, attributes, raw_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, traceID, spanID, parentSpanID, serviceName, activitySourceName, spanName, kind, startTime, endTime, statusCode, attrsJSON, string(rawJSON))
 
 	return err
 }

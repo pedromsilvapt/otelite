@@ -27,7 +27,16 @@ func handleAPITracesList(w http.ResponseWriter, r *http.Request) {
 			MIN(t.start_time)  AS first_start,
 			MAX(t.end_time)    AS last_end,
 			COUNT(*)           AS span_count,
-			GROUP_CONCAT(DISTINCT t.service_name) AS services,
+			(SELECT GROUP_CONCAT(svc, ',')
+			 FROM (
+			   SELECT service_name AS svc
+			   FROM traces
+			   WHERE trace_id = t.trace_id
+			     AND service_name IS NOT NULL AND service_name != ''
+			   GROUP BY service_name
+			   ORDER BY MIN(start_time) ASC
+			 )
+			) AS services,
 			(SELECT span_name FROM traces
 			 WHERE trace_id = t.trace_id
 			   AND (parent_span_id = '' OR parent_span_id IS NULL)
@@ -92,7 +101,7 @@ func handleAPITrace(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(`
-		SELECT id, trace_id, span_id, parent_span_id, service_name, span_name,
+		SELECT id, trace_id, span_id, parent_span_id, service_name, activity_source, span_name,
 		       kind, start_time, end_time, status_code, attributes
 		FROM traces
 		WHERE trace_id = ?
@@ -105,27 +114,32 @@ func handleAPITrace(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type SpanEntry struct {
-		ID           int             `json:"id"`
-		TraceID      string          `json:"trace_id"`
-		SpanID       string          `json:"span_id"`
-		ParentSpanID string          `json:"parent_span_id"`
-		ServiceName  string          `json:"service_name"`
-		SpanName     string          `json:"span_name"`
-		Kind         int             `json:"kind"`
-		StartTime    int64           `json:"start_time"`
-		EndTime      int64           `json:"end_time"`
-		StatusCode   int             `json:"status_code"`
-		Attributes   json.RawMessage `json:"attributes,omitempty"`
+		ID             int             `json:"id"`
+		TraceID        string          `json:"trace_id"`
+		SpanID         string          `json:"span_id"`
+		ParentSpanID   string          `json:"parent_span_id"`
+		ServiceName    string          `json:"service_name"`
+		ActivitySource string          `json:"activity_source"`
+		SpanName       string          `json:"span_name"`
+		Kind           int             `json:"kind"`
+		StartTime      int64           `json:"start_time"`
+		EndTime        int64           `json:"end_time"`
+		StatusCode     int             `json:"status_code"`
+		Attributes     json.RawMessage `json:"attributes,omitempty"`
 	}
 
 	var spans []SpanEntry
 	for rows.Next() {
 		var s SpanEntry
 		var attrs sql.NullString
+		var activitySource sql.NullString
 		if err := rows.Scan(&s.ID, &s.TraceID, &s.SpanID, &s.ParentSpanID,
-			&s.ServiceName, &s.SpanName, &s.Kind,
+			&s.ServiceName, &activitySource, &s.SpanName, &s.Kind,
 			&s.StartTime, &s.EndTime, &s.StatusCode, &attrs); err != nil {
 			continue
+		}
+		if activitySource.Valid {
+			s.ActivitySource = activitySource.String
 		}
 		if attrs.Valid {
 			s.Attributes = json.RawMessage(attrs.String)
@@ -533,6 +547,15 @@ const PALETTE=['#58a6ff','#3fb950','#d29922','#fb8f44','#a5a5ff','#79c0ff','#56d
 const _svcClr={};let _ci=0;
 function svcColor(s){if(!_svcClr[s])_svcClr[s]=PALETTE[_ci++%PALETTE.length];return _svcClr[s];}
 
+// Returns the display label for a span's source column.
+// If ActivitySource.Name starts with ServiceName, show only ActivitySource.Name
+// (it already carries enough context); otherwise prefix with ServiceName.
+function spanSvcLabel(svc,src){
+  if(!src)return esc(svc||'—');
+  if(svc&&src.startsWith(svc))return esc(src);
+  return esc((svc?svc+' ':'')+src);
+}
+
 function sevClass(n){
   if(n>=21)return'sev-fatal';if(n>=17)return'sev-error';
   if(n>=13)return'sev-warn';if(n>=9)return'sev-info';
@@ -899,7 +922,7 @@ async function renderTraceDetail(traceId){
                   <span class="span-name-text" title="${esc(s.span_name)}">${esc(s.span_name||'—')}</span>
                 </div>
               </td>
-              <td class="wf-col-svc" style="color:${clr}">${esc(s.service_name||'—')}</td>
+              <td class="wf-col-svc" style="color:${clr}">${spanSvcLabel(s.service_name,s.activity_source)}</td>
               <td class="wf-col-dur">${fmtDur(dur)}</td>
               <td class="wf-col-bar">
                 <div class="bar-track">
