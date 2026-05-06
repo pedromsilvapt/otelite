@@ -2,6 +2,8 @@
 
 A lightweight OpenTelemetry collector that stores traces and logs in SQLite. Designed for local development and debugging - no complex infrastructure required.
 
+> **NOTE** This is a vibe-coded fork of the lovingly tiny **otelite** project, adding some small quality of life improvements on the server, and a beautiful and simple Web UI for viewing traces & logs.
+
 ## Features
 
 - Receives OTLP traces and logs over HTTP
@@ -9,6 +11,15 @@ A lightweight OpenTelemetry collector that stores traces and logs in SQLite. Des
 - Supports both JSON and Protobuf encodings
 - Single binary with no external dependencies
 - Built-in CLI for querying stored data
+- Simple web UI for browsing traces and logs
+- Endpoint to clear the database without restarting the app
+
+## Screenshots
+
+| | |
+|---|---|
+| ![UI Screenshot 1](screenshots/otelite-ui-0.png) | ![UI Screenshot 2](screenshots/otelite-ui-1.png) |
+| ![UI Screenshot 3](screenshots/otelite-ui-2.png) | ![UI Screenshot 4](screenshots/otelite-ui-3.png) |
 
 ## Build
 
