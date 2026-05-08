@@ -1,0 +1,10 @@
+services:
+  otelite:
+    image: ghcr.io/pedromsilvapt/otelite:latest
+    ports:
+      - "4318:4318"
+    volumes:
+      - otelite-data:/data
+
+volumes:
+  otelite-data:
