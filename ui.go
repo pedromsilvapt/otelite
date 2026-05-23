@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -12,6 +13,24 @@ import (
 func handleUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(uiHTML))
+}
+
+// handleAPIDBStats returns the SQLite database file size.
+func handleAPIDBStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var size int64
+	if dbFilePath != "" {
+		if info, err := os.Stat(dbFilePath); err == nil {
+			size = info.Size()
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"size": size,
+	})
 }
 
 // handleAPITracesList returns a summary list of traces, one row per trace_id.
@@ -27,6 +46,7 @@ func handleAPITracesList(w http.ResponseWriter, r *http.Request) {
 			MIN(t.start_time)  AS first_start,
 			MAX(t.end_time)    AS last_end,
 			COUNT(*)           AS span_count,
+			MAX(CASE WHEN t.status_code=2 THEN 2 WHEN t.status_code=1 THEN 1 ELSE 0 END) AS trace_status,
 			(SELECT GROUP_CONCAT(svc, ',')
 			 FROM (
 			   SELECT service_name AS svc
@@ -57,6 +77,7 @@ func handleAPITracesList(w http.ResponseWriter, r *http.Request) {
 		FirstStart   int64  `json:"first_start"`
 		LastEnd      int64  `json:"last_end"`
 		SpanCount    int    `json:"span_count"`
+		StatusCode   int    `json:"status_code"`
 		Services     string `json:"services"`
 		RootSpanName string `json:"root_span_name"`
 	}
@@ -65,7 +86,7 @@ func handleAPITracesList(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var e TraceEntry
 		var rootSpanName, services sql.NullString
-		if err := rows.Scan(&e.TraceID, &e.FirstStart, &e.LastEnd, &e.SpanCount, &services, &rootSpanName); err != nil {
+		if err := rows.Scan(&e.TraceID, &e.FirstStart, &e.LastEnd, &e.SpanCount, &e.StatusCode, &services, &rootSpanName); err != nil {
 			continue
 		}
 		if services.Valid {
@@ -294,6 +315,20 @@ nav{
 }
 .btn-danger:hover{color:var(--red);border-color:var(--red);background:rgba(248,81,73,.08)}
 
+.db-size{font-size:11px;color:var(--muted);margin-right:10px;white-space:nowrap}
+
+/* ── PAGINATION ──────────────────────────────── */
+.pager{display:flex;align-items:center;gap:6px;padding:12px 0;justify-content:center}
+.pager-btn{
+  background:var(--surface2);border:1px solid var(--border2);
+  color:var(--muted);font-family:var(--font);font-size:12px;
+  padding:4px 10px;border-radius:6px;cursor:pointer;min-width:32px;
+  transition:background .15s,border-color .15s,color .15s;
+}
+.pager-btn:hover{background:var(--border2);color:var(--text)}
+.pager-btn.active{background:var(--accent);border-color:var(--accent);color:#0d1117}
+.pager-info{font-size:11px;color:var(--muted);margin-right:6px}
+
 /* ── PAGE SHELL ───────────────────────────────── */
 .page{padding:24px;animation:fadeIn .18s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
@@ -499,6 +534,7 @@ nav{
   <a class="nav-link" id="nav-traces" href="#/traces">Traces</a>
   <a class="nav-link" id="nav-logs"   href="#/logs">Logs</a>
   <span class="nav-spacer"></span>
+  <span class="db-size" id="db-size-label"></span>
   <button class="btn-danger" onclick="deleteAllData()" title="Delete all traces and logs">
     <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
       <path d="M6.5 1h3a.5.5 0 0 1 .5.5v1H6v-1a.5.5 0 0 1 .5-.5zM11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3A1.5 1.5 0 0 0 5 1.5v1H2.506a.58.58 0 0 0-.01 0H1.5a.5.5 0 0 0 0 1h.538l.853 10.66A2 2 0 0 0 4.885 16h6.23a2 2 0 0 0 1.994-1.84l.853-10.66H14.5a.5.5 0 0 0 0-1h-.995a.59.59 0 0 0-.01 0H11zm1.958 1-.846 10.58a1 1 0 0 1-.997.92h-6.23a1 1 0 0 1-.997-.92L3.042 3.5h9.916z"/>
@@ -570,12 +606,41 @@ function sevLabel(n,t){
 function statusCls(c){return c===2?'color:var(--red)':c===1?'color:var(--green)':'color:var(--muted)'}
 function statusLbl(c){return c===2?'ERROR':c===1?'OK':'UNSET'}
 
+function fmtBytes(b){
+  if(!b||b<=0)return'';
+  if(b<1024)return b+' B';
+  if(b<1048576)return(b/1024).toFixed(1)+' KB';
+  if(b<1073741824)return(b/1048576).toFixed(1)+' MB';
+  return(b/1073741824).toFixed(2)+' GB';
+}
+
+function renderPager(id,page,total,pageSize,fnName){
+  const el=document.getElementById(id);if(!el)return;
+  const totalPages=Math.ceil(total/pageSize);
+  if(totalPages<=1){el.innerHTML='';return;}
+  const s=Math.max(1,page-2),e=Math.min(totalPages,page+2);
+  const from=(page-1)*pageSize+1,to=Math.min(page*pageSize,total);
+  let h='<div class="pager"><span class="pager-info">'+from+'–'+to+' of '+total+'</span>';
+  if(page>1)h+='<button class="pager-btn" onclick="'+fnName+'('+(page-1)+')">←</button>';
+  for(let i=s;i<=e;i++)h+='<button class="pager-btn'+(i===page?' active':'')+'" onclick="'+fnName+'('+i+')">'+i+'</button>';
+  if(page<totalPages)h+='<button class="pager-btn" onclick="'+fnName+'('+(page+1)+')">→</button>';
+  h+='</div>';
+  el.innerHTML=h;
+}
+
 // ── Router ─────────────────────────────────────────────────────────────────
 
 function go(h){location.hash=h}
 
 window.addEventListener('hashchange',route);
 window.addEventListener('load',route);
+window.addEventListener('load',async function(){
+  try{
+    const d=await apiFetch('/api/db-stats');
+    const el=document.getElementById('db-size-label');
+    if(el){const s=fmtBytes(d.size||0);if(s)el.textContent=s;}
+  }catch(_){}
+});
 
 function route(){
   const h=location.hash.replace(/^#/,'')||'/traces';
@@ -612,8 +677,8 @@ async function deleteAllData(){
 
 // ── Global filter state ────────────────────────────────────────────────────
 
-const _ls={data:[],traceId:'',text:'',services:new Set(),levels:new Set()};
-const _ts={data:[],services:new Set()};
+const _ls={data:[],traceId:'',text:'',services:new Set(),levels:new Set(),page:1,pageSize:50};
+const _ts={data:[],services:new Set(),statuses:new Set(),page:1,pageSize:50};
 const SEV_LABELS=['TRACE','DEBUG','INFO','WARN','ERROR','FATAL'];
 const SEV_COLORS={TRACE:'var(--muted)',DEBUG:'var(--muted)',INFO:'var(--green)',WARN:'var(--yellow)',ERROR:'var(--red)',FATAL:'var(--red)'};
 function sevRange(label){return{TRACE:[1,4],DEBUG:[5,8],INFO:[9,12],WARN:[13,16],ERROR:[17,20],FATAL:[21,99]}[label]||[0,99];}
@@ -629,10 +694,27 @@ async function renderTraces(){
 
   _ts.data=data.traces||[];
   _ts.services=new Set();
+  _ts.statuses=new Set();
+  _ts.page=1;
 
   const allSvcs=new Set();
   _ts.data.forEach(t=>(t.services||'').split(',').filter(Boolean).forEach(s=>allSvcs.add(s)));
   const svcList=[...allSvcs].sort();
+
+  const allStatCodes=new Set(_ts.data.map(t=>t.status_code||0));
+  const STATUS_OPTS=[{code:2,label:'ERROR',clr:'var(--red)'},{code:1,label:'OK',clr:'var(--green)'},{code:0,label:'UNSET',clr:'var(--muted)'}];
+  const statOpts=STATUS_OPTS.filter(s=>allStatCodes.has(s.code));
+
+  const svcFilterHtml=svcList.length>1
+    ?'<div class="filter-section"><span class="filter-label">Service</span><div class="chip-group" id="t-svc-chips">'+
+      svcList.map(s=>'<button class="chip" data-svc="'+esc(s)+'" onclick="toggleTraceService(\''+esc(s)+'\')" style="--chip-clr:'+svcColor(s)+'">'+esc(s)+'</button>').join('')+
+      '</div></div>':''
+  ;
+  const statFilterHtml=statOpts.length>1
+    ?'<div class="filter-section"><span class="filter-label">Status</span><div class="chip-group" id="t-status-chips">'+
+      statOpts.map(s=>'<button class="chip" data-status="'+s.code+'" onclick="toggleTraceStatus('+s.code+')" style="--chip-clr:'+s.clr+'">'+s.label+'</button>').join('')+
+      '</div></div>':''
+  ;
 
   app.innerHTML=` + "`" + `
   <div class="page">
@@ -640,20 +722,16 @@ async function renderTraces(){
       <span class="page-title">Traces</span>
       <span class="badge" id="traces-count">${_ts.data.length}</span>
     </div>
-    ${svcList.length>1?` + "`" + `
-    <div class="filter-section">
-      <span class="filter-label">Service</span>
-      <div class="chip-group" id="t-svc-chips">
-        ${svcList.map(s=>'<button class="chip" data-svc="'+esc(s)+'" onclick="toggleTraceService(\''+esc(s)+'\')" style="--chip-clr:'+svcColor(s)+'">'+esc(s)+'</button>').join('')}
-      </div>
-    </div>` + "`" + `:''}
+    ${svcFilterHtml}
+    ${statFilterHtml}
     <table class="data-table">
       <thead><tr>
-        <th>Trace ID</th><th>Root Span</th><th>Services</th>
+        <th>Trace ID</th><th>Status</th><th>Root Span</th><th>Services</th>
         <th>Start</th><th>Duration</th><th>Spans</th>
       </tr></thead>
       <tbody id="traces-tbody"></tbody>
     </table>
+    <div id="traces-pager"></div>
   </div>` + "`" + `;
 
   renderTracesBody();
@@ -663,8 +741,17 @@ function toggleTraceService(s){
   const btn=document.querySelector('#t-svc-chips [data-svc="'+s+'"]');
   if(_ts.services.has(s)){_ts.services.delete(s);btn&&btn.classList.remove('active');}
   else{_ts.services.add(s);btn&&btn.classList.add('active');}
-  renderTracesBody();
+  _ts.page=1;renderTracesBody();
 }
+
+function toggleTraceStatus(code){
+  const btn=document.querySelector('[data-status="'+code+'"]');
+  if(_ts.statuses.has(code)){_ts.statuses.delete(code);btn&&btn.classList.remove('active');}
+  else{_ts.statuses.add(code);btn&&btn.classList.add('active');}
+  _ts.page=1;renderTracesBody();
+}
+
+function setTracesPage(p){_ts.page=p;renderTracesBody();}
 
 function renderTracesBody(){
   let list=_ts.data;
@@ -674,16 +761,26 @@ function renderTracesBody(){
       return svcs.some(s=>_ts.services.has(s));
     });
   }
+  if(_ts.statuses.size>0){list=list.filter(t=>_ts.statuses.has(t.status_code||0));}
+  const total=list.length;
   const countEl=document.getElementById('traces-count');
-  if(countEl)countEl.textContent=list.length;
+  if(countEl)countEl.textContent=total;
   const tbody=document.getElementById('traces-tbody');
   if(!tbody)return;
-  if(!list.length){tbody.innerHTML='<tr class="empty"><td colspan="6">No traces found</td></tr>';return;}
-  tbody.innerHTML=list.map(t=>{
+  if(!total){
+    tbody.innerHTML='<tr class="empty"><td colspan="7">No traces found</td></tr>';
+    renderPager('traces-pager',1,0,_ts.pageSize,'setTracesPage');
+    return;
+  }
+  const start=(_ts.page-1)*_ts.pageSize;
+  const page=list.slice(start,start+_ts.pageSize);
+  tbody.innerHTML=page.map(t=>{
     const dur=(t.last_end&&t.first_start)?t.last_end-t.first_start:0;
     const svcs=(t.services||'').split(',').filter(Boolean);
+    const sc=t.status_code||0;
     return` + "`" + `<tr onclick="go('/trace/${t.trace_id}')">
       <td><span class="trace-id">${shortId(t.trace_id)}</span></td>
+      <td><span style="font-size:11px;font-weight:600;${statusCls(sc)}">${statusLbl(sc)}</span></td>
       <td>${esc(t.root_span_name)||'<span class="muted">—</span>'}</td>
       <td>${svcs.map(s=>'<span style="color:'+svcColor(s)+'">'+esc(s)+'</span>').join(' ')}</td>
       <td class="muted small">${fmtNano(t.first_start)}</td>
@@ -691,6 +788,7 @@ function renderTracesBody(){
       <td class="muted">${t.span_count}</td>
     </tr>` + "`" + `;
   }).join('');
+  renderPager('traces-pager',_ts.page,total,_ts.pageSize,'setTracesPage');
 }
 
 // ── Page: Logs List ────────────────────────────────────────────────────────
@@ -703,6 +801,7 @@ async function renderLogs(filterTraceId){
   _ls.text='';
   _ls.services=new Set();
   _ls.levels=new Set();
+  _ls.page=1;
 
   const url='/api/logs'+(filterTraceId?'?trace_id='+encodeURIComponent(filterTraceId):'');
   let data;
@@ -750,26 +849,29 @@ async function renderLogs(filterTraceId){
       </tr></thead>
       <tbody id="logs-tbody"></tbody>
     </table>
+    <div id="logs-pager"></div>
   </div>` + "`" + `;
 
   renderLogsBody();
 }
 
-function onLogSearch(v){_ls.text=v.toLowerCase();renderLogsBody();}
+function onLogSearch(v){_ls.text=v.toLowerCase();_ls.page=1;renderLogsBody();}
 
 function toggleLogService(s){
   const btn=document.querySelector('[data-log-svc="'+s+'"]');
   if(_ls.services.has(s)){_ls.services.delete(s);btn&&btn.classList.remove('active');}
   else{_ls.services.add(s);btn&&btn.classList.add('active');}
-  renderLogsBody();
+  _ls.page=1;renderLogsBody();
 }
 
 function toggleLogLevel(lbl){
   const btn=document.querySelector('[data-log-lbl="'+lbl+'"]');
   if(_ls.levels.has(lbl)){_ls.levels.delete(lbl);btn&&btn.classList.remove('active');}
   else{_ls.levels.add(lbl);btn&&btn.classList.add('active');}
-  renderLogsBody();
+  _ls.page=1;renderLogsBody();
 }
+
+function setLogsPage(p){_ls.page=p;renderLogsBody();}
 
 function renderLogsBody(){
   let list=_ls.data;
@@ -781,12 +883,19 @@ function renderLogsBody(){
       return[..._ls.levels].some(lbl=>{const[lo,hi]=sevRange(lbl);return n>=lo&&n<=hi;});
     });
   }
+  const total=list.length;
   const countEl=document.getElementById('logs-count');
-  if(countEl)countEl.textContent=list.length;
+  if(countEl)countEl.textContent=total;
   const tbody=document.getElementById('logs-tbody');
   if(!tbody)return;
-  if(!list.length){tbody.innerHTML='<tr class="empty"><td colspan="5">No logs found</td></tr>';return;}
-  tbody.innerHTML=list.map(l=>{
+  if(!total){
+    tbody.innerHTML='<tr class="empty"><td colspan="5">No logs found</td></tr>';
+    renderPager('logs-pager',1,0,_ls.pageSize,'setLogsPage');
+    return;
+  }
+  const start=(_ls.page-1)*_ls.pageSize;
+  const page=list.slice(start,start+_ls.pageSize);
+  tbody.innerHTML=page.map(l=>{
     const ts=l.log_timestamp>0?fmtNano(l.log_timestamp):fmtTs(l.timestamp);
     const sn=l.severity_number||0;
     const trLink=l.trace_id
@@ -800,6 +909,7 @@ function renderLogsBody(){
       <td class="log-msg">${esc(l.body||'')}</td>
     </tr>` + "`" + `;
   }).join('');
+  renderPager('logs-pager',_ls.page,total,_ls.pageSize,'setLogsPage');
 }
 
 // ── Page: Trace Detail ─────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ import (
 )
 
 var db *sql.DB
+var dbFilePath string // path to the SQLite database file, used by /api/db-stats
 
 // Insert queue to serialize all database writes
 type insertJob struct {
@@ -814,6 +815,7 @@ func runServer(ctx context.Context, args []string) {
 	fs.Parse(args)
 
 	log.Printf("initializing database: %s", *dbPath)
+	dbFilePath = *dbPath
 	if err := initDB(*dbPath); err != nil {
 		log.Fatalf("failed to initialize database: %v", err)
 	}
@@ -825,6 +827,7 @@ func runServer(ctx context.Context, args []string) {
 	mux.HandleFunc("/v1/traces", handleTraces)
 	mux.HandleFunc("/v1/logs", handleLogs)
 	mux.HandleFunc("/api/data", handleDeleteAll)
+	mux.HandleFunc("/api/db-stats", handleAPIDBStats)
 	mux.HandleFunc("/traces", handleQuery)
 	// UI routes — /api/traces/{id} must be registered before /api/traces
 	mux.HandleFunc("/api/traces/", handleAPITrace)
