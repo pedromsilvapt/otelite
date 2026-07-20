@@ -198,7 +198,6 @@ func handleAPILogs(w http.ResponseWriter, r *http.Request) {
 		FROM logs
 		%s
 		ORDER BY log_timestamp DESC
-		LIMIT 500
 	`
 	if traceID != "" {
 		rows, err = db.Query(strings.Replace(q, "%s", "WHERE trace_id = ?", 1), traceID)
